@@ -1,0 +1,16 @@
+[package]
+name = "fx"
+description = "A Rust effect system with declarative abilities and type-safe capability composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+fx-macros.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
