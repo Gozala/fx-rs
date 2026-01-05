@@ -204,7 +204,7 @@ mod macro_tests {
     async fn test_effect_composition() {
         let mut app = CounterApp { count: 10 };
 
-        // Manually compose effects - this is what effect! would expand to
+        // Manually compose effects
         let current = Counter::get_count().perform(&mut app).await;
         Counter::add(current).perform(&mut app).await;
         let result = current * 2;
@@ -219,7 +219,6 @@ mod macro_tests {
             value: "initial".to_string(),
         };
 
-        // Manually compose state effects
         let old = State::<String>::get().perform(&mut app).await;
         State::<String>::set(format!("{} modified", old))
             .perform(&mut app)
@@ -237,13 +236,13 @@ mod macro_tests {
     async fn test_effect_macro_simple() {
         let mut app = CounterApp { count: 10 };
 
-        let task = effect! {
+        // effect! takes provider and body, returns an async block
+        let result = effect!(&mut app, {
             let current = yield Counter::get_count();
             yield Counter::add(current);
             current * 2
-        };
+        }).await;
 
-        let result = task.perform(&mut app).await;
         assert_eq!(result, 20); // 10 * 2
         assert_eq!(app.count, 20); // 10 + 10
     }
@@ -254,13 +253,12 @@ mod macro_tests {
             value: "initial".to_string(),
         };
 
-        let task = effect! {
+        let result = effect!(&mut app, {
             let old = yield State::<String>::get();
             yield State::<String>::set(format!("{} modified", old));
             yield State::<String>::get()
-        };
+        }).await;
 
-        let result = task.perform(&mut app).await;
         assert_eq!(result, "initial modified");
     }
 
@@ -268,6 +266,7 @@ mod macro_tests {
     // Test the #[effectful] attribute macro
     // ===========================================
 
+    // #[effectful] generates a struct with .perform() method
     #[effectful(Counter)]
     fn double_count() -> i32 {
         let count = perform!(Counter::get_count());
@@ -278,48 +277,49 @@ mod macro_tests {
     #[tokio::test]
     async fn test_effectful_macro() {
         let mut app = CounterApp { count: 5 };
+        // Returns a struct, call .perform(&mut provider).await
         let result = double_count().perform(&mut app).await;
         assert_eq!(result, 10); // 5 * 2
         assert_eq!(app.count, 10); // 5 + 5
     }
 
-    // ===========================================
-    // Test helper functions (manual pattern)
-    // ===========================================
-
-    async fn double_count_manual<P: CounterProvider + Send>(provider: &mut P) -> i32 {
-        let count = Counter::get_count().perform(provider).await;
-        Counter::add(count).perform(provider).await;
-        count * 2
-    }
-
-    #[tokio::test]
-    async fn test_manual_effectful() {
-        let mut app = CounterApp { count: 5 };
-        let result = double_count_manual(&mut app).await;
-        assert_eq!(result, 10); // 5 * 2
-        assert_eq!(app.count, 10); // 5 + 5
-    }
-
-    async fn append_suffix_manual<P: StateProvider<String> + Send>(
-        provider: &mut P,
-        suffix: String,
-    ) -> String {
-        let current = State::<String>::get().perform(provider).await;
+    // Test effectful with additional arguments
+    #[effectful(State<String>)]
+    fn append_suffix(suffix: String) -> String {
+        let current = perform!(State::<String>::get());
         let new_value = format!("{}{}", current, suffix);
-        State::<String>::set(new_value.clone())
-            .perform(provider)
-            .await;
+        perform!(State::<String>::set(new_value.clone()));
         new_value
     }
 
     #[tokio::test]
-    async fn test_manual_effectful_with_args() {
+    async fn test_effectful_macro_with_args() {
         let mut app = StateApp {
             value: "hello".to_string(),
         };
-        let result = append_suffix_manual(&mut app, " world".to_string()).await;
+        // Pass args to fn, then .perform() with provider
+        let result = append_suffix(" world".to_string()).perform(&mut app).await;
         assert_eq!(result, "hello world");
         assert_eq!(app.value, "hello world");
+    }
+
+    // ===========================================
+    // Test complex effectful operations
+    // ===========================================
+
+    #[effectful(Counter)]
+    fn complex_operation() -> i32 {
+        let x = perform!(Counter::get_count());
+        perform!(Counter::add(x));
+        perform!(Counter::add(x));
+        x * 3
+    }
+
+    #[tokio::test]
+    async fn test_effectful_complex() {
+        let mut app = CounterApp { count: 10 };
+        let result = complex_operation().perform(&mut app).await;
+        assert_eq!(result, 30); // 10 * 3
+        assert_eq!(app.count, 30); // 10 + 10 + 10
     }
 }

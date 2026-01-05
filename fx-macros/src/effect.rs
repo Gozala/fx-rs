@@ -5,9 +5,6 @@ use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 
 /// Transform `yield expr` into `(expr).perform(__fx_provider).await` at the token level.
-///
-/// This works by scanning tokens and when we find `yield`, we collect the following
-/// expression tokens until we hit a semicolon or closing delimiter at the same depth.
 fn transform_yield_expressions(tokens: TokenStream2) -> TokenStream2 {
     let mut result = Vec::new();
     let mut iter = tokens.into_iter().peekable();
@@ -63,22 +60,64 @@ fn transform_yield_expressions(tokens: TokenStream2) -> TokenStream2 {
     result.into_iter().collect()
 }
 
+/// Parse the effect! macro input.
+/// Syntax: effect!(provider, { body })
+/// Or just: effect!({ body }) - for use inside effectful functions where __fx_provider exists
+struct EffectInput {
+    provider: Option<syn::Expr>,
+    body: TokenStream2,
+}
+
+impl syn::parse::Parse for EffectInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        // Try to parse as: provider, { body }
+        if input.peek(syn::token::Brace) {
+            // Just a body block - use __fx_provider from scope
+            let content;
+            syn::braced!(content in input);
+            let body: TokenStream2 = content.parse()?;
+            Ok(EffectInput {
+                provider: None,
+                body,
+            })
+        } else {
+            // provider, { body }
+            let provider: syn::Expr = input.parse()?;
+            input.parse::<syn::Token![,]>()?;
+            let content;
+            syn::braced!(content in input);
+            let body: TokenStream2 = content.parse()?;
+            Ok(EffectInput {
+                provider: Some(provider),
+                body,
+            })
+        }
+    }
+}
+
 pub fn effect_impl(input: TokenStream) -> TokenStream {
-    let input2: TokenStream2 = input.into();
+    let parsed = syn::parse_macro_input!(input as EffectInput);
 
     // Transform all `yield expr` into `(expr).perform(__fx_provider).await`
-    let transformed = transform_yield_expressions(input2);
+    let transformed = transform_yield_expressions(parsed.body);
 
-    // Wrap in Effectful for ergonomic .perform() syntax
-    // Use a reborrowing pattern: take &mut P, reborrow as &mut inside the async block
-    let output: TokenStream2 = quote! {
-        fx::Effectful::new(|__fx_provider: &mut _| {
-            // Reborrow the provider so we can use it multiple times in the async block
-            let __fx_provider = &mut *__fx_provider;
-            Box::pin(async move {
+    let output: TokenStream2 = if let Some(provider) = parsed.provider {
+        // effect!(provider, { body }) - creates an async block with provider bound
+        quote! {
+            {
+                let __fx_provider = #provider;
+                async move {
+                    #transformed
+                }
+            }
+        }
+    } else {
+        // effect!({ body }) - assumes __fx_provider is in scope
+        quote! {
+            async {
                 #transformed
-            })
-        })
+            }
+        }
     };
 
     output.into()
