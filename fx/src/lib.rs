@@ -73,7 +73,9 @@ pub mod task;
 pub mod variant;
 
 // Re-export main types at crate root
-pub use capability::{CanProvide, CapabilityGroup, FlattenGroups, Handle};
+pub use capability::{
+    dispatch, CapabilityGroup, FlattenGroups, Handle, Handles, HasAbility, OutputVariant,
+};
 pub use effect::{CapabilityRouter, Effect, EffectExt, PerformIn};
 pub use provider::Provider;
 pub use task::{Effectful, PerformExt, Task};
@@ -321,6 +323,80 @@ mod macro_tests {
         let result = complex_operation().perform(&mut app).await;
         assert_eq!(result, 30); // 10 * 3
         assert_eq!(app.count, 30); // 10 + 10 + 10
+    }
+
+    // ===========================================
+    // Test direct Provider<Capabilities> implementation
+    // (without using the provider trait)
+    // ===========================================
+
+    // Define a simple ability for this test
+    ability! {
+        pub DirectCounter {
+            fn get() -> i32;
+            fn inc() -> ()
+        }
+    }
+
+    // Type aliases for clarity
+    type DirectCaps = Variant<DirectCounterGet, Variant<DirectCounterInc, Never>>;
+    type DirectOutput = Variant<i32, Variant<(), Never>>;
+
+    // Implement Provider<Capabilities> directly - like effing-mad handlers
+    // This receives a Variant, pattern matches, and returns a Variant
+    struct DirectProvider {
+        count: i32,
+    }
+
+    impl Provider<DirectCaps> for DirectProvider {
+        type Output = DirectOutput;
+
+        async fn invoke(&mut self, effect: DirectCaps) -> Self::Output {
+            match effect {
+                Variant::Here(DirectCounterGet) => {
+                    // Return i32 wrapped in Variant::Here
+                    Variant::Here(self.count)
+                }
+                Variant::There(Variant::Here(DirectCounterInc)) => {
+                    // Increment and return () wrapped in Variant::There(Variant::Here(...))
+                    self.count += 1;
+                    Variant::There(Variant::Here(()))
+                }
+                Variant::There(Variant::There(never)) => match never {},
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_provider_get() {
+        let mut provider = DirectProvider { count: 42 };
+        // Use dispatch() for direct Provider<Caps> implementation
+        let result = DirectCounter::get().dispatch(&mut provider).await;
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn test_direct_provider_inc() {
+        let mut provider = DirectProvider { count: 10 };
+        // Use dispatch() for direct Provider<Caps> implementation
+        DirectCounter::inc().dispatch(&mut provider).await;
+        assert_eq!(provider.count, 11);
+    }
+
+    // Test effectful with direct provider - perform! uses dispatch internally
+    #[effectful(DirectCounter)]
+    fn direct_double() -> i32 {
+        let val = perform!(DirectCounter::get());
+        perform!(DirectCounter::inc());
+        val * 2
+    }
+
+    #[tokio::test]
+    async fn test_direct_provider_effectful() {
+        let mut provider = DirectProvider { count: 5 };
+        let result = direct_double().perform(&mut provider).await;
+        assert_eq!(result, 10); // 5 * 2
+        assert_eq!(provider.count, 6); // incremented once
     }
 
 }
