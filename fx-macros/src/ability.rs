@@ -391,6 +391,75 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         quote! { (#(#phantom_types),*) }
     };
 
+    // Build CanProvide where clause: P must implement the provider trait
+    let can_provide_where = if where_clause.is_some() {
+        let existing_preds: Vec<_> = where_clause
+            .as_ref()
+            .map(|w| w.predicates.iter().collect())
+            .unwrap_or_default();
+        quote! {
+            where
+                __FxP: #provider_trait_name #type_generics + Send,
+                #(#existing_preds),*
+        }
+    } else {
+        quote! {
+            where __FxP: #provider_trait_name #type_generics + Send
+        }
+    };
+
+    // Collect all generic params for CanProvide impl
+    let mut can_provide_params: Vec<TokenStream2> = vec![quote! { __FxP }];
+    for param in &generics.params {
+        can_provide_params.push(quote! { #param });
+    }
+
+    // Generate Handle impls for each capability
+    let handle_impls: Vec<TokenStream2> = def
+        .methods
+        .iter()
+        .zip(cap_struct_names.iter())
+        .map(|(m, cap_name)| {
+            let return_type = &m.return_type;
+            let method_generics = &m.generics;
+            let combined_generics = combine_generics(generics, method_generics);
+            let (_, cap_type_generics, _) = combined_generics.split_for_impl();
+
+            // Build generic params including __FxP
+            let mut all_params: Vec<TokenStream2> = vec![quote! { __FxP }];
+            for param in &combined_generics.params {
+                all_params.push(quote! { #param });
+            }
+
+            // Build where clause
+            let mut where_predicates: Vec<TokenStream2> =
+                vec![quote! { __FxP: #provider_trait_name #type_generics + Send }];
+            where_predicates.push(quote! { #return_type: Send });
+            for param in &combined_generics.params {
+                if let syn::GenericParam::Type(ty) = param {
+                    let ident = &ty.ident;
+                    where_predicates.push(quote! { #ident: Send });
+                }
+            }
+            if let Some(wc) = &combined_generics.where_clause {
+                for pred in &wc.predicates {
+                    where_predicates.push(quote! { #pred });
+                }
+            }
+
+            quote! {
+                impl <#(#all_params),*> fx::capability::Handle<#cap_name #cap_type_generics, __FxP> for #name #type_generics
+                where
+                    #(#where_predicates),*
+                {
+                    async fn handle(effect: #cap_name #cap_type_generics, provider: &mut __FxP) -> #return_type {
+                        fx::provider::Provider::<#cap_name #cap_type_generics>::invoke(provider, effect).await
+                    }
+                }
+            }
+        })
+        .collect();
+
     quote! {
         // Provider trait
         #vis trait #provider_trait_name #impl_generics #where_clause {
@@ -409,6 +478,9 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         // Provider impls (blanket)
         #(#provider_impls)*
 
+        // Handle impls - dispatch effects through ability type
+        #(#handle_impls)*
+
         // Marker struct
         #vis struct #name #impl_generics (::core::marker::PhantomData<#phantom_tuple>) #where_clause;
 
@@ -419,6 +491,11 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         impl #impl_generics fx::capability::CapabilityGroup for #name #type_generics #where_clause {
             type Capabilities = #variant_type;
         }
+
+        // CanProvide impl - indicates P can provide all capabilities in this group
+        impl <#(#can_provide_params),*> fx::capability::CanProvide<__FxP> for #name #type_generics
+            #can_provide_where
+        {}
     }
 }
 

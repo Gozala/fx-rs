@@ -6,6 +6,7 @@
 
 use crate::capability::CapabilityGroup;
 use crate::provider::Provider;
+use crate::variant::{Extract, VariantOf};
 use core::future::Future;
 
 /// The main trait for effectful operations.
@@ -78,6 +79,51 @@ where
 {
     async fn execute(self, provider: &mut P) -> Self::Output {
         provider.invoke(self).await
+    }
+}
+
+/// Trait for performing an effect within a specific capabilities context.
+///
+/// This trait enables effects to be performed through a provider that implements
+/// `Provider<Caps>` where `Caps` is a Variant containing multiple capability types.
+/// The effect is injected into the Variant, executed, and the result is extracted.
+///
+/// The `Idx` type parameter is a type-level index that determines where in the
+/// Variant the effect type lives. This is typically inferred by the compiler.
+pub trait PerformIn<Caps, Idx>: Effect {
+    /// Perform this effect within the given capabilities context.
+    ///
+    /// The effect is injected into the `Caps` variant, invoked via the provider,
+    /// and the result is extracted from the output variant.
+    fn perform_in<P>(self, provider: &mut P) -> impl Future<Output = Self::Output> + Send
+    where
+        Self: Send,
+        P: Provider<Caps> + Send,
+        Caps: VariantOf<Self, Idx> + Send,
+        <P as Provider<Caps>>::Output: Extract<Self::Output, Idx> + Send;
+}
+
+impl<E, Caps, Idx> PerformIn<Caps, Idx> for E
+where
+    E: Effect,
+{
+    async fn perform_in<P>(self, provider: &mut P) -> Self::Output
+    where
+        Self: Send,
+        P: Provider<Caps> + Send,
+        Caps: VariantOf<Self, Idx> + Send,
+        <P as Provider<Caps>>::Output: Extract<Self::Output, Idx> + Send,
+    {
+        // Inject this effect into the Capabilities variant
+        let caps: Caps = Caps::of(self);
+        // Invoke the provider with the variant
+        let result = provider.invoke(caps).await;
+        // Extract our output from the result variant
+        // This is safe because we injected at Idx and extract at Idx
+        match result.extract() {
+            Ok(output) => output,
+            Err(_) => unreachable!("effect was injected at the same index we extract from"),
+        }
     }
 }
 

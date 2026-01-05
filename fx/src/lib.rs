@@ -73,8 +73,8 @@ pub mod task;
 pub mod variant;
 
 // Re-export main types at crate root
-pub use capability::{CapabilityGroup, FlattenGroups};
-pub use effect::{CapabilityRouter, Effect, EffectExt};
+pub use capability::{CanProvide, CapabilityGroup, FlattenGroups, Handle};
+pub use effect::{CapabilityRouter, Effect, EffectExt, PerformIn};
 pub use provider::Provider;
 pub use task::{Effectful, PerformExt, Task};
 pub use variant::{Concat, Extract, Never, Variant, VariantOf, S, Z};
@@ -85,7 +85,7 @@ pub use fx_macros::{ability, effect, effectful, perform};
 /// Convenient prelude module for common imports.
 pub mod prelude {
     pub use crate::capability::{CapabilityGroup, FlattenGroups};
-    pub use crate::effect::{CapabilityRouter, Effect, EffectExt};
+    pub use crate::effect::{CapabilityRouter, Effect, EffectExt, PerformIn};
     pub use crate::provider::Provider;
     pub use crate::task::{Effectful, PerformExt, Task};
     pub use crate::variant::{Concat, Extract, Never, S, Variant, VariantOf, Z};
