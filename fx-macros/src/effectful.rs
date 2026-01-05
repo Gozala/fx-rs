@@ -33,14 +33,10 @@ fn get_provider_trait(ty: &Type) -> Option<TokenStream2> {
             let ident = &last_segment.ident;
             let provider_ident = Ident::new(&format!("{}Provider", ident), Span::call_site());
 
-            // Build the full path with Provider suffix
-            let mut segments = path.segments.clone();
-            if let Some(last) = segments.last_mut() {
-                last.ident = provider_ident;
-            }
+            // Keep the generics from the original type
+            let args = &last_segment.arguments;
 
-            let prefix: Vec<_> = segments.iter().collect();
-            Some(quote! { #(#prefix)::* })
+            Some(quote! { #provider_ident #args })
         }
         _ => None,
     }
@@ -72,80 +68,49 @@ pub fn effectful_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Build generics with __FxP added
     let existing_params = &fn_generics.params;
-    let existing_where = fn_generics.where_clause.as_ref();
+    let existing_where = &fn_generics.where_clause;
 
-    // Collect provider trait bounds from capabilities
-    // For each capability like Counter, we add __FxP: CounterProvider
-    let provider_bounds: Vec<TokenStream2> = attr
+    // Collect provider trait names from capabilities (just the trait names, not full bounds)
+    let provider_traits: Vec<TokenStream2> = attr
         .capabilities
         .iter()
         .filter_map(|cap| get_provider_trait(cap))
-        .map(|provider_trait| quote! { __FxP: #provider_trait })
         .collect();
 
-    // Generate a unique name for the inner async function
-    let inner_fn_name = Ident::new(&format!("__{}_inner", fn_name), Span::call_site());
+    // Build the type parameter bounds
+    let type_bounds = if provider_traits.is_empty() {
+        quote! { Send }
+    } else {
+        quote! { #(#provider_traits +)* Send }
+    };
 
     // Generate the transformed function
-    // We define an inner async function and wrap it in Effectful
     let output: TokenStream2 = if existing_params.is_empty() {
-        if provider_bounds.is_empty() {
-            quote! {
-                #vis fn #fn_name<__FxP: Send>(#fn_args) -> fx::Effectful<
-                    impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                >
+        quote! {
+            #vis fn #fn_name<__FxP>(#fn_args) -> fx::Effectful<
+                impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
+            >
+            where
+                __FxP: #type_bounds,
                 #existing_where
-                {
-                    fn #inner_fn_name<__FxP: Send>(__fx_provider: &mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>> {
-                        Box::pin(async move #body)
-                    }
-                    fx::Effectful::new(#inner_fn_name)
-                }
-            }
-        } else {
-            quote! {
-                #vis fn #fn_name<__FxP: Send + #(#provider_bounds +)*>(#fn_args) -> fx::Effectful<
-                    impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                >
-                #existing_where
-                {
-                    fn #inner_fn_name<__FxP: Send + #(#provider_bounds +)*>(__fx_provider: &mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>> {
-                        Box::pin(async move #body)
-                    }
-                    fx::Effectful::new(#inner_fn_name)
-                }
+            {
+                fx::Effectful::new(move |__fx_provider: &mut __FxP| -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>> {
+                    Box::pin(async move #body)
+                })
             }
         }
     } else {
-        if provider_bounds.is_empty() {
-            quote! {
-                #vis fn #fn_name<__FxP: Send, #existing_params>(#fn_args) -> fx::Effectful<
-                    impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                >
+        quote! {
+            #vis fn #fn_name<__FxP, #existing_params>(#fn_args) -> fx::Effectful<
+                impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
+            >
+            where
+                __FxP: #type_bounds,
                 #existing_where
-                {
-                    fn #inner_fn_name<__FxP: Send, #existing_params>(__fx_provider: &mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                    #existing_where
-                    {
-                        Box::pin(async move #body)
-                    }
-                    fx::Effectful::new(#inner_fn_name)
-                }
-            }
-        } else {
-            quote! {
-                #vis fn #fn_name<__FxP: Send + #(#provider_bounds +)*, #existing_params>(#fn_args) -> fx::Effectful<
-                    impl FnOnce(&mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                >
-                #existing_where
-                {
-                    fn #inner_fn_name<__FxP: Send + #(#provider_bounds +)*, #existing_params>(__fx_provider: &mut __FxP) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>>
-                    #existing_where
-                    {
-                        Box::pin(async move #body)
-                    }
-                    fx::Effectful::new(#inner_fn_name)
-                }
+            {
+                fx::Effectful::new(move |__fx_provider: &mut __FxP| -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = #return_type> + Send + '_>> {
+                    Box::pin(async move #body)
+                })
             }
         }
     };

@@ -70,8 +70,11 @@ pub fn effect_impl(input: TokenStream) -> TokenStream {
     let transformed = transform_yield_expressions(input2);
 
     // Wrap in Effectful for ergonomic .perform() syntax
+    // Use a reborrowing pattern: take &mut P, reborrow as &mut inside the async block
     let output: TokenStream2 = quote! {
-        fx::Effectful::new(|__fx_provider| {
+        fx::Effectful::new(|__fx_provider: &mut _| {
+            // Reborrow the provider so we can use it multiple times in the async block
+            let __fx_provider = &mut *__fx_provider;
             Box::pin(async move {
                 #transformed
             })

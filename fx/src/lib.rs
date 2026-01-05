@@ -230,11 +230,62 @@ mod macro_tests {
     }
 
     // ===========================================
-    // Test helper functions that use perform!
+    // Test the effect! macro
     // ===========================================
 
-    // Note: The #[effectful] macro works best for simple cases.
-    // For functions with captures, use async fn directly.
+    #[tokio::test]
+    async fn test_effect_macro_simple() {
+        let mut app = CounterApp { count: 10 };
+
+        let task = effect! {
+            let current = yield Counter::get_count();
+            yield Counter::add(current);
+            current * 2
+        };
+
+        let result = task.perform(&mut app).await;
+        assert_eq!(result, 20); // 10 * 2
+        assert_eq!(app.count, 20); // 10 + 10
+    }
+
+    #[tokio::test]
+    async fn test_effect_macro_with_state() {
+        let mut app = StateApp {
+            value: "initial".to_string(),
+        };
+
+        let task = effect! {
+            let old = yield State::<String>::get();
+            yield State::<String>::set(format!("{} modified", old));
+            yield State::<String>::get()
+        };
+
+        let result = task.perform(&mut app).await;
+        assert_eq!(result, "initial modified");
+    }
+
+    // ===========================================
+    // Test the #[effectful] attribute macro
+    // ===========================================
+
+    #[effectful(Counter)]
+    fn double_count() -> i32 {
+        let count = perform!(Counter::get_count());
+        perform!(Counter::add(count));
+        count * 2
+    }
+
+    #[tokio::test]
+    async fn test_effectful_macro() {
+        let mut app = CounterApp { count: 5 };
+        let result = double_count().perform(&mut app).await;
+        assert_eq!(result, 10); // 5 * 2
+        assert_eq!(app.count, 10); // 5 + 5
+    }
+
+    // ===========================================
+    // Test helper functions (manual pattern)
+    // ===========================================
 
     async fn double_count_manual<P: CounterProvider + Send>(provider: &mut P) -> i32 {
         let count = Counter::get_count().perform(provider).await;
