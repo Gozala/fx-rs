@@ -92,6 +92,56 @@ impl<F, C, O> IntoTask<C, O> for Task<F, C, O> {
     }
 }
 
+/// A wrapper for effectful closures with simpler bounds.
+///
+/// Unlike `Task`, this wrapper doesn't track capability types at the type level.
+/// It's primarily used by the `#[effectful]` macro.
+pub struct Effectful<F> {
+    f: F,
+}
+
+impl<F> Effectful<F> {
+    /// Create a new effectful wrapper.
+    #[inline]
+    pub const fn new(f: F) -> Self {
+        Effectful { f }
+    }
+
+    /// Execute with a provider.
+    #[inline]
+    pub fn perform<P, Fut, O>(self, provider: &mut P) -> Fut
+    where
+        F: FnOnce(&mut P) -> Fut,
+        Fut: Future<Output = O>,
+    {
+        (self.f)(provider)
+    }
+}
+
+/// Extension trait that adds `.perform()` to boxed async closures.
+///
+/// This is used by the `#[effectful]` macro to provide ergonomic syntax.
+pub trait PerformExt<P, O> {
+    /// The future type returned by perform.
+    type Future: Future<Output = O>;
+
+    /// Execute the effectful operation with a provider.
+    fn perform(self, provider: &mut P) -> Self::Future;
+}
+
+impl<F, P, Fut> PerformExt<P, Fut::Output> for F
+where
+    F: FnOnce(&mut P) -> Fut,
+    Fut: Future,
+{
+    type Future = Fut;
+
+    #[inline]
+    fn perform(self, provider: &mut P) -> Fut {
+        self(provider)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

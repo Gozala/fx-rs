@@ -256,23 +256,38 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
             let method_generics = &m.generics;
             let return_type = &m.return_type;
             let combined_generics = combine_generics(generics, method_generics);
-            let (cap_impl_generics, cap_type_generics, cap_where) =
+            let (_cap_impl_generics, cap_type_generics, _cap_where) =
                 combined_generics.split_for_impl();
 
             let arg_names: Vec<&Ident> = m.args.iter().map(|(n, _)| n).collect();
 
-            // Build the provider bounds
-            let send_where = add_provider_bounds(
-                &combined_generics,
-                cap_where.cloned(),
-                &provider_trait_name,
-                type_generics.clone(),
-            );
+            // Build generic params including __FxP
+            let mut all_params: Vec<TokenStream2> = vec![quote! { __FxP }];
+            for param in &combined_generics.params {
+                all_params.push(quote! { #param });
+            }
+            let all_generics = quote! { <#(#all_params),*> };
+
+            // Build where clause with provider bound
+            let mut where_predicates: Vec<TokenStream2> =
+                vec![quote! { __FxP: #provider_trait_name #type_generics + Send }];
+            for param in &combined_generics.params {
+                if let syn::GenericParam::Type(ty) = param {
+                    let ident = &ty.ident;
+                    where_predicates.push(quote! { #ident: Send });
+                }
+            }
+            if let Some(wc) = &combined_generics.where_clause {
+                for pred in &wc.predicates {
+                    where_predicates.push(quote! { #pred });
+                }
+            }
+            let where_clause = quote! { where #(#where_predicates),* };
 
             if m.args.is_empty() {
                 quote! {
-                    impl #cap_impl_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
-                        #send_where
+                    impl #all_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
+                        #where_clause
                     {
                         type Output = #return_type;
 
@@ -283,8 +298,8 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
                 }
             } else {
                 quote! {
-                    impl #cap_impl_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
-                        #send_where
+                    impl #all_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
+                        #where_clause
                     {
                         type Output = #return_type;
 
@@ -305,7 +320,8 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         .map(|(m, cap_name)| {
             let method_name = &m.name;
             let method_generics = &m.generics;
-            let (method_impl_generics, method_type_generics, method_where) =
+            let combined_generics = combine_generics(generics, method_generics);
+            let (method_impl_generics, _method_type_generics, method_where) =
                 method_generics.split_for_impl();
             let args: Vec<TokenStream2> = m
                 .args
@@ -316,18 +332,24 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
                 .collect();
             let arg_names: Vec<&Ident> = m.args.iter().map(|(n, _)| n).collect();
 
+            // For the capability type, we need ability generics + method generics
+            let (_, cap_type_generics, _) = combined_generics.split_for_impl();
+
             if m.args.is_empty() {
-                if method_generics.params.is_empty() {
+                // No arguments - check if there are ANY generics (ability + method)
+                if combined_generics.params.is_empty() {
+                    // Unit struct - no generics at all
                     quote! {
                         #[inline]
-                        pub fn #method_name() -> #cap_name #type_generics {
-                            #cap_name(::core::marker::PhantomData)
+                        pub fn #method_name() -> #cap_name {
+                            #cap_name
                         }
                     }
                 } else {
+                    // Has generics - use PhantomData
                     quote! {
                         #[inline]
-                        pub fn #method_name #method_impl_generics () -> #cap_name #type_generics #method_where {
+                        pub fn #method_name #method_impl_generics () -> #cap_name #cap_type_generics #method_where {
                             #cap_name(::core::marker::PhantomData)
                         }
                     }
@@ -335,7 +357,7 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
             } else {
                 quote! {
                     #[inline]
-                    pub fn #method_name #method_impl_generics (#(#args),*) -> #cap_name #type_generics #method_type_generics #method_where {
+                    pub fn #method_name #method_impl_generics (#(#args),*) -> #cap_name #cap_type_generics #method_where {
                         #cap_name { #(#arg_names),* }
                     }
                 }
@@ -453,34 +475,6 @@ fn add_send_bounds(generics: &Generics, where_clause: Option<WhereClause>) -> To
         }
     } else {
         quote! {}
-    }
-}
-
-/// Add provider bounds.
-fn add_provider_bounds(
-    generics: &Generics,
-    where_clause: Option<WhereClause>,
-    provider_trait: &Ident,
-    type_generics: syn::TypeGenerics,
-) -> TokenStream2 {
-    let mut predicates = vec![quote! { __FxP: #provider_trait #type_generics + Send }];
-
-    for param in &generics.params {
-        if let syn::GenericParam::Type(ty) = param {
-            let ident = &ty.ident;
-            predicates.push(quote! { #ident: Send });
-        }
-    }
-
-    if let Some(wc) = where_clause {
-        let existing: Vec<_> = wc.predicates.iter().collect();
-        quote! {
-            where #(#existing,)* #(#predicates),*
-        }
-    } else {
-        quote! {
-            where #(#predicates),*
-        }
     }
 }
 

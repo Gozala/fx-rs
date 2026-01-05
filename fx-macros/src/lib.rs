@@ -1,10 +1,11 @@
 //! Procedural macros for the fx effect system.
 //!
-//! This crate provides three main macros:
+//! This crate provides these macros:
 //!
 //! - `ability!{}` - Declaratively define abilities with their capabilities
 //! - `effect!{}` - Create inline effectful code blocks with `yield`
-//! - `#[effectful]` - Wrap async functions to return effects
+//! - `#[effectful]` - Wrap functions to return effects (use `perform!` inside)
+//! - `perform!` - Helper macro for performing effects in `#[effectful]` functions
 
 use proc_macro::TokenStream;
 
@@ -19,16 +20,6 @@ mod effectful;
 /// - Capability structs for each method
 /// - Effect and CapabilityGroup implementations
 /// - A marker struct with builder methods
-///
-/// # Syntax
-///
-/// ```ignore
-/// ability! {
-///     $vis:vis $Name:ident $(<$($T:ident),+>)? {
-///         $(fn $method:ident $(<$($M:ident $(: $bound:path)*)?),+>)? ($($arg:ident: $ArgTy:ty),*) -> $Ret:ty);* $(;)?
-///     }
-/// }
-/// ```
 ///
 /// # Example
 ///
@@ -56,22 +47,6 @@ pub fn ability(input: TokenStream) -> TokenStream {
 /// The `effect!{}` macro wraps code containing `yield` expressions
 /// into a `Task` that can be performed with a provider.
 ///
-/// # Syntax
-///
-/// ```ignore
-/// effect! {
-///     // Code with yield expressions
-///     let value = yield SomeEffect::method();
-///     yield AnotherEffect::do_something(value);
-///     value
-/// }
-/// ```
-///
-/// # Expansion
-///
-/// The macro transforms `yield expr` into `expr.perform(provider).await`
-/// and wraps the body in a Task closure.
-///
 /// # Example
 ///
 /// ```ignore
@@ -83,44 +58,58 @@ pub fn ability(input: TokenStream) -> TokenStream {
 ///
 /// let result = my_effect.perform(&mut provider).await;
 /// ```
+///
+/// The macro transforms `yield expr` into `expr.perform(provider).await`
+/// and wraps the body in a Task closure.
 #[proc_macro]
 pub fn effect(input: TokenStream) -> TokenStream {
     effect::effect_impl(input)
 }
 
-/// Mark an async function as effectful.
+/// Mark a function as effectful.
 ///
-/// The `#[effectful]` attribute macro transforms an async function
-/// that uses `yield` expressions into a function that returns an effect.
-///
-/// # Syntax
-///
-/// ```ignore
-/// #[effectful(CapabilityGroup1, CapabilityGroup2, ...)]
-/// async fn name(args...) -> ReturnType {
-///     // body with yield expressions
-/// }
-/// ```
+/// The `#[effectful]` attribute transforms a function into one that returns
+/// an effect. Use `perform!()` macro inside for effect invocations.
 ///
 /// # Example
 ///
 /// ```ignore
-/// #[effectful(State<i32>, Logger)]
-/// async fn read_and_log() -> i32 {
-///     let value = yield State::<i32>::get();
-///     yield Logger::log(value.to_string());
-///     value
+/// #[effectful(State<i32>)]
+/// fn read_value() -> i32 {
+///     perform!(State::<i32>::get())
 /// }
 ///
 /// // Usage:
-/// let result = read_and_log().perform(&mut provider).await;
+/// let result = read_value().perform(&mut provider).await;
 /// ```
 ///
-/// # Expansion
-///
-/// The macro transforms the function to return `impl Effect<Output = ReturnType>`
-/// with the appropriate capability bounds.
+/// **Note**: Use `perform!()` inside `#[effectful]` functions. The `yield`
+/// syntax only works inside `effect! {}` blocks (due to Rust's keyword parsing).
 #[proc_macro_attribute]
 pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
     effectful::effectful_impl(attr, item)
+}
+
+/// Perform an effect inside an effectful context.
+///
+/// This macro is used inside `#[effectful]` functions to invoke effects.
+/// It expands to `(expr).perform(__fx_provider).await`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[effectful(Counter)]
+/// fn increment_twice() -> i32 {
+///     perform!(Counter::increment());
+///     perform!(Counter::increment());
+///     perform!(Counter::get_count())
+/// }
+/// ```
+#[proc_macro]
+pub fn perform(input: TokenStream) -> TokenStream {
+    let input2: proc_macro2::TokenStream = input.into();
+    let output = quote::quote! {
+        (#input2).perform(__fx_provider).await
+    };
+    output.into()
 }

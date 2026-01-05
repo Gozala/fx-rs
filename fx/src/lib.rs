@@ -61,6 +61,10 @@
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
+#![allow(unused_extern_crates)]
+
+// Self-alias to allow internal tests to use `fx::` paths
+extern crate self as fx;
 
 pub mod capability;
 pub mod effect;
@@ -68,149 +72,203 @@ pub mod provider;
 pub mod task;
 pub mod variant;
 
+// Re-export main types at crate root
+pub use capability::{CapabilityGroup, FlattenGroups};
+pub use effect::{CapabilityRouter, Effect, EffectExt};
+pub use provider::Provider;
+pub use task::{Effectful, PerformExt, Task};
+pub use variant::{Concat, Extract, Never, Variant, VariantOf, S, Z};
+
 /// Re-export of procedural macros.
-pub use fx_macros::{ability, effect, effectful};
+pub use fx_macros::{ability, effect, effectful, perform};
 
 /// Convenient prelude module for common imports.
 pub mod prelude {
     pub use crate::capability::{CapabilityGroup, FlattenGroups};
     pub use crate::effect::{CapabilityRouter, Effect, EffectExt};
     pub use crate::provider::Provider;
-    pub use crate::task::Task;
+    pub use crate::task::{Effectful, PerformExt, Task};
     pub use crate::variant::{Concat, Extract, Never, S, Variant, VariantOf, Z};
-    pub use fx_macros::{ability, effect, effectful};
+    pub use fx_macros::{ability, effect, effectful, perform};
 }
 
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
-mod integration_tests {
+mod macro_tests {
     use crate::prelude::*;
 
-    // Manual implementation of State ability for testing
-    // (before the macro is implemented)
+    // ===========================================
+    // Test the ability! macro
+    // ===========================================
 
-    // Provider trait
-    trait StateProvider<T> {
-        fn get(&mut self) -> T;
-        fn set(&mut self, value: T);
-    }
-
-    // Capability structs
-    struct StateGet<T>(core::marker::PhantomData<T>);
-    struct StateSet<T> {
-        value: T,
-    }
-
-    // CapabilityGroup impls
-    impl<T> CapabilityGroup for StateGet<T> {
-        type Capabilities = Variant<StateGet<T>, Never>;
-    }
-
-    impl<T> CapabilityGroup for StateSet<T> {
-        type Capabilities = Variant<StateSet<T>, Never>;
-    }
-
-    // Effect impls
-    impl<T: Clone + Send> Effect for StateGet<T> {
-        type Output = T;
-    }
-
-    impl<T: Send> Effect for StateSet<T> {
-        type Output = ();
-    }
-
-    // Provider impls
-    impl<T: Clone + Send, P: StateProvider<T> + Send> Provider<StateGet<T>> for P {
-        type Output = T;
-
-        async fn invoke(&mut self, _: StateGet<T>) -> T {
-            self.get()
+    ability! {
+        pub Counter {
+            fn get_count() -> i32;
+            fn increment() -> ();
+            fn add(amount: i32) -> i32
         }
     }
 
-    impl<T: Send, P: StateProvider<T> + Send> Provider<StateSet<T>> for P {
-        type Output = ();
+    // Provider implementation
+    struct CounterApp {
+        count: i32,
+    }
 
-        async fn invoke(&mut self, effect: StateSet<T>) {
-            self.set(effect.value)
+    impl CounterProvider for CounterApp {
+        fn get_count(&mut self) -> i32 {
+            self.count
+        }
+
+        fn increment(&mut self) {
+            self.count += 1;
+        }
+
+        fn add(&mut self, amount: i32) -> i32 {
+            self.count += amount;
+            self.count
         }
     }
 
-    // Capability group marker + builders
-    struct State<T>(core::marker::PhantomData<T>);
+    #[tokio::test]
+    async fn test_ability_macro_get() {
+        let mut app = CounterApp { count: 42 };
+        let result = Counter::get_count().perform(&mut app).await;
+        assert_eq!(result, 42);
+    }
 
-    impl<T> State<T> {
-        fn get() -> StateGet<T> {
-            StateGet(core::marker::PhantomData)
-        }
+    #[tokio::test]
+    async fn test_ability_macro_increment() {
+        let mut app = CounterApp { count: 10 };
+        Counter::increment().perform(&mut app).await;
+        assert_eq!(app.count, 11);
+    }
 
-        fn set(value: T) -> StateSet<T> {
-            StateSet { value }
+    #[tokio::test]
+    async fn test_ability_macro_with_args() {
+        let mut app = CounterApp { count: 10 };
+        let result = Counter::add(5).perform(&mut app).await;
+        assert_eq!(result, 15);
+        assert_eq!(app.count, 15);
+    }
+
+    // ===========================================
+    // Test ability! with generics
+    // ===========================================
+
+    ability! {
+        pub State<T> {
+            fn get() -> T;
+            fn set(value: T) -> ()
         }
     }
 
-    impl<T> CapabilityGroup for State<T> {
-        type Capabilities = Variant<StateGet<T>, Variant<StateSet<T>, Never>>;
+    struct StateApp {
+        value: String,
     }
 
-    // Test provider implementation
-    struct Counter {
-        value: i32,
-    }
-
-    impl StateProvider<i32> for Counter {
-        fn get(&mut self) -> i32 {
-            self.value
+    impl StateProvider<String> for StateApp {
+        fn get(&mut self) -> String {
+            self.value.clone()
         }
 
-        fn set(&mut self, value: i32) {
+        fn set(&mut self, value: String) {
             self.value = value;
         }
     }
 
     #[tokio::test]
-    async fn test_state_get() {
-        let mut counter = Counter { value: 42 };
-        let result = State::<i32>::get().perform(&mut counter).await;
-        assert_eq!(result, 42);
+    async fn test_ability_macro_generic_get() {
+        let mut app = StateApp {
+            value: "hello".to_string(),
+        };
+        let result = State::<String>::get().perform(&mut app).await;
+        assert_eq!(result, "hello");
     }
 
     #[tokio::test]
-    async fn test_state_set() {
-        let mut counter = Counter { value: 0 };
-        State::<i32>::set(42).perform(&mut counter).await;
-        assert_eq!(counter.value, 42);
+    async fn test_ability_macro_generic_set() {
+        let mut app = StateApp {
+            value: "hello".to_string(),
+        };
+        State::<String>::set("world".to_string())
+            .perform(&mut app)
+            .await;
+        assert_eq!(app.value, "world");
+    }
+
+    // ===========================================
+    // Test effect composition using direct provider calls
+    // ===========================================
+
+    #[tokio::test]
+    async fn test_effect_composition() {
+        let mut app = CounterApp { count: 10 };
+
+        // Manually compose effects - this is what effect! would expand to
+        let current = Counter::get_count().perform(&mut app).await;
+        Counter::add(current).perform(&mut app).await;
+        let result = current * 2;
+
+        assert_eq!(result, 20); // 10 * 2
+        assert_eq!(app.count, 20); // 10 + 10
     }
 
     #[tokio::test]
-    async fn test_state_get_set_sequence() {
-        let mut counter = Counter { value: 10 };
+    async fn test_state_composition() {
+        let mut app = StateApp {
+            value: "initial".to_string(),
+        };
 
-        let value = State::<i32>::get().perform(&mut counter).await;
-        assert_eq!(value, 10);
+        // Manually compose state effects
+        let old = State::<String>::get().perform(&mut app).await;
+        State::<String>::set(format!("{} modified", old))
+            .perform(&mut app)
+            .await;
+        let result = State::<String>::get().perform(&mut app).await;
 
-        State::<i32>::set(value + 5).perform(&mut counter).await;
+        assert_eq!(result, "initial modified");
+    }
 
-        let new_value = State::<i32>::get().perform(&mut counter).await;
-        assert_eq!(new_value, 15);
+    // ===========================================
+    // Test helper functions that use perform!
+    // ===========================================
+
+    // Note: The #[effectful] macro works best for simple cases.
+    // For functions with captures, use async fn directly.
+
+    async fn double_count_manual<P: CounterProvider + Send>(provider: &mut P) -> i32 {
+        let count = Counter::get_count().perform(provider).await;
+        Counter::add(count).perform(provider).await;
+        count * 2
     }
 
     #[tokio::test]
-    async fn test_task_with_effects() {
-        use core::future::ready;
+    async fn test_manual_effectful() {
+        let mut app = CounterApp { count: 5 };
+        let result = double_count_manual(&mut app).await;
+        assert_eq!(result, 10); // 5 * 2
+        assert_eq!(app.count, 10); // 5 + 5
+    }
 
-        // Use ready() future to avoid lifetime issues with async blocks
-        // In practice, the effect! and #[effectful] macros handle this properly
-        let task: Task<_, Variant<StateGet<i32>, Variant<StateSet<i32>, Never>>, i32> =
-            Task::new(|counter: &mut Counter| {
-                // Perform effects synchronously for this test
-                let value = counter.value;
-                counter.value = value * 2;
-                ready(counter.value)
-            });
+    async fn append_suffix_manual<P: StateProvider<String> + Send>(
+        provider: &mut P,
+        suffix: String,
+    ) -> String {
+        let current = State::<String>::get().perform(provider).await;
+        let new_value = format!("{}{}", current, suffix);
+        State::<String>::set(new_value.clone())
+            .perform(provider)
+            .await;
+        new_value
+    }
 
-        let mut counter = Counter { value: 21 };
-        let result = task.perform(&mut counter).await;
-        assert_eq!(result, 42);
+    #[tokio::test]
+    async fn test_manual_effectful_with_args() {
+        let mut app = StateApp {
+            value: "hello".to_string(),
+        };
+        let result = append_suffix_manual(&mut app, " world".to_string()).await;
+        assert_eq!(result, "hello world");
+        assert_eq!(app.value, "hello world");
     }
 }
