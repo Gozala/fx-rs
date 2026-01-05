@@ -74,7 +74,7 @@ pub mod variant;
 
 // Re-export main types at crate root
 pub use capability::{Capability, CapabilityOf, FlattenGroups};
-pub use effect::{perform_effect, DispatchExt, Effect};
+pub use effect::{perform_effect, Effect};
 pub use provider::Provider;
 pub use task::{Effectful, PerformExt, Task};
 pub use variant::{Concat, Extract, Never, Variant, VariantOf, S, Z};
@@ -85,7 +85,7 @@ pub use fx_macros::{ability, effect, effectful, perform};
 /// Convenient prelude module for common imports.
 pub mod prelude {
     pub use crate::capability::{Capability, CapabilityOf, FlattenGroups};
-    pub use crate::effect::{perform_effect, DispatchExt, Effect};
+    pub use crate::effect::{perform_effect, Effect};
     pub use crate::provider::Provider;
     pub use crate::task::{Effectful, PerformExt, Task};
     pub use crate::variant::{Concat, Extract, Never, S, Variant, VariantOf, Z};
@@ -336,9 +336,9 @@ mod macro_tests {
         }
     }
 
-    // Type aliases for clarity
-    type DirectCaps = Variant<DirectCounterGet, Variant<DirectCounterInc, Never>>;
-    type DirectOutput = Variant<i32, Variant<(), Never>>;
+    // Type aliases for clarity - these match the generated DirectCounterYield/DirectCounterResume
+    type DirectCaps = DirectCounterYield;
+    type DirectOutput = DirectCounterResume;
 
     // Implement Provider<Capabilities> directly - like effing-mad handlers
     // This receives a Variant, pattern matches, and returns a Variant
@@ -368,20 +368,20 @@ mod macro_tests {
     #[tokio::test]
     async fn test_direct_provider_get() {
         let mut provider = DirectProvider { count: 42 };
-        // Use dispatch() for direct Provider<Caps> implementation
-        let result = DirectCounter::get().dispatch(&mut provider).await;
+        // Use perform() - now works directly with Provider<Caps>
+        let result = DirectCounter::get().perform(&mut provider).await;
         assert_eq!(result, 42);
     }
 
     #[tokio::test]
     async fn test_direct_provider_inc() {
         let mut provider = DirectProvider { count: 10 };
-        // Use dispatch() for direct Provider<Caps> implementation
-        DirectCounter::inc().dispatch(&mut provider).await;
+        // Use perform() - now works directly with Provider<Caps>
+        DirectCounter::inc().perform(&mut provider).await;
         assert_eq!(provider.count, 11);
     }
 
-    // Test effectful with direct provider - perform! uses dispatch internally
+    // Test effectful with direct provider
     #[effectful(DirectCounter)]
     fn direct_double() -> i32 {
         let val = perform!(DirectCounter::get());

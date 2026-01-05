@@ -3,7 +3,7 @@
 //! This module defines the core `Effect` trait that all effects implement,
 //! providing the `perform` method to execute effects with a provider.
 
-use crate::capability::{Capability, CapabilityOf};
+use crate::capability::Capability;
 use crate::provider::Provider;
 use crate::variant::{Extract, VariantOf};
 use core::future::Future;
@@ -44,6 +44,8 @@ pub trait Effect: Capability + Sized {
     where
         Self: Send,
         P: Provider<Self::Yield, Output = Self::Resume> + Send,
+        Self::Yield: Send,
+        Self::Resume: Send,
         Self::Outcome: Send;
 }
 
@@ -82,82 +84,6 @@ where
     }
 }
 
-/// Extension trait for dispatching effects through ability-wide providers.
-///
-/// This trait is automatically implemented for all effects that implement
-/// both `Effect` and `CapabilityOf`. Use `dispatch` when you have a provider
-/// that implements `Provider<AbilityYield>` directly, rather than provider traits.
-///
-/// # When to use `dispatch` vs `perform`
-///
-/// - Use `perform` with provider trait implementations (e.g., `CounterProvider`)
-/// - Use `dispatch` with direct `Provider<Capabilities>` implementations
-///
-/// # Example
-///
-/// ```ignore
-/// // Direct provider implementation (like effing-mad handlers)
-/// impl Provider<DirectCounterDo> for MyProvider {
-///     type Output = DirectCounterDone;
-///     async fn invoke(&mut self, effect: DirectCounterDo) -> Self::Output {
-///         match effect {
-///             Variant::Here(DirectCounterGet) => Variant::Here(self.count),
-///             Variant::There(Variant::Here(DirectCounterInc)) => {
-///                 self.count += 1;
-///                 Variant::There(Variant::Here(()))
-///             }
-///             Variant::There(Variant::There(never)) => match never {},
-///         }
-///     }
-/// }
-///
-/// // Use dispatch with direct provider
-/// let result = DirectCounter::get().dispatch(&mut provider).await;
-/// ```
-pub trait DispatchExt: Effect + CapabilityOf {
-    /// Dispatch this effect to a provider that handles the full ability's capabilities.
-    ///
-    /// Unlike `perform`, which requires a provider for this effect's narrow `Yield`/`Resume`,
-    /// `dispatch` uses the ability's wide `Yield`/`Resume` types via `CapabilityOf`.
-    fn dispatch<P>(self, provider: &mut P) -> impl Future<Output = Self::Outcome> + Send
-    where
-        Self: Send,
-        <Self::Ability as Capability>::Yield: VariantOf<Self, Self::Index> + Send,
-        P: Provider<
-                <Self::Ability as Capability>::Yield,
-                Output = <Self::Ability as Capability>::Resume,
-            > + Send,
-        <Self::Ability as Capability>::Resume: Extract<Self::Outcome, Self::Index> + Send,
-        Self::Outcome: Send;
-}
-
-impl<E> DispatchExt for E
-where
-    E: Effect + CapabilityOf,
-{
-    async fn dispatch<P>(self, provider: &mut P) -> Self::Outcome
-    where
-        Self: Send,
-        <Self::Ability as Capability>::Yield: VariantOf<Self, Self::Index> + Send,
-        P: Provider<
-                <Self::Ability as Capability>::Yield,
-                Output = <Self::Ability as Capability>::Resume,
-            > + Send,
-        <Self::Ability as Capability>::Resume: Extract<Self::Outcome, Self::Index> + Send,
-        Self::Outcome: Send,
-    {
-        perform_effect::<
-            Self,
-            <Self::Ability as Capability>::Yield,
-            <Self::Ability as Capability>::Resume,
-            Self::Outcome,
-            Self::Index,
-            P,
-        >(self, provider)
-        .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +104,8 @@ mod tests {
         where
             Self: Send,
             P: Provider<Self::Yield, Output = Self::Resume> + Send,
+            Self::Yield: Send,
+            Self::Resume: Send,
             Self::Outcome: Send,
         {
             perform_effect::<Self, Self::Yield, Self::Resume, Self::Outcome, Z, P>(

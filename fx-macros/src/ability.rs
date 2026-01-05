@@ -105,8 +105,8 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
     let provider_trait_name = format_ident!("{}Provider", name);
 
     // Generate type alias names
-    let do_type_name = format_ident!("{}Do", name);
-    let done_type_name = format_ident!("{}Done", name);
+    let yield_type_name = format_ident!("{}Yield", name);
+    let resume_type_name = format_ident!("{}Resume", name);
 
     // Generate capability struct names
     let cap_struct_names: Vec<Ident> = def
@@ -212,22 +212,23 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
     let yield_type = build_variant_type(&cap_struct_names, type_generics.clone());
     let resume_type = build_output_variant_type(def);
 
-    // Generate Capability impls for each effect (individual effect's Yield/Resume)
+    // Generate Capability impls for each effect (uses ability's wide Yield/Resume)
     let cap_capability_impls: Vec<TokenStream2> = def
         .methods
         .iter()
         .zip(cap_struct_names.iter())
         .map(|(m, cap_name)| {
-            let return_type = &m.return_type;
             let method_generics = &m.generics;
             let combined_generics = combine_generics(generics, method_generics);
             let (cap_impl_generics, cap_type_generics, cap_where) =
                 combined_generics.split_for_impl();
 
+            // Each effect uses the ability's wide Yield/Resume types
+            // This allows Effect::perform to work with Provider<AbilityYield>
             quote! {
                 impl #cap_impl_generics fx::Capability for #cap_name #cap_type_generics #cap_where {
-                    type Yield = fx::Variant<#cap_name #cap_type_generics, fx::Never>;
-                    type Resume = fx::Variant<#return_type, fx::Never>;
+                    type Yield = #yield_type_name #type_generics;
+                    type Resume = #resume_type_name #type_generics;
                 }
             }
         })
@@ -246,11 +247,12 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
             let (cap_impl_generics, cap_type_generics, cap_where) =
                 combined_generics.split_for_impl();
 
-            // Build type-level index for this effect's position
-            let _idx_type = build_index_type(idx);
+            // Build type-level index for this effect's position in the ability's Yield variant
+            let idx_type = build_index_type(idx);
 
-            // The perform method bounds are fixed by the trait - only these three bounds
-            // are allowed. Extra generic bounds must be on the impl block, not the method.
+            // The perform method bounds are fixed by the trait.
+            // Now that Yield/Resume are the ability's wide types, perform works directly
+            // with Provider<AbilityYield> - no dispatch needed.
             quote! {
                 impl #cap_impl_generics fx::Effect for #cap_name #cap_type_generics #cap_where {
                     type Outcome = #return_type;
@@ -259,9 +261,11 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
                     where
                         Self: Send,
                         __FxP: fx::Provider<Self::Yield, Output = Self::Resume> + Send,
+                        Self::Yield: Send,
+                        Self::Resume: Send,
                         Self::Outcome: Send,
                     {
-                        fx::perform_effect::<Self, Self::Yield, Self::Resume, Self::Outcome, fx::Z, __FxP>(
+                        fx::perform_effect::<Self, Self::Yield, Self::Resume, Self::Outcome, #idx_type, __FxP>(
                             self, provider
                         ).await
                     }
@@ -443,13 +447,13 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         }
 
         // Type aliases for the ability's Yield and Resume variants
-        #vis type #do_type_name #impl_generics = #yield_type;
-        #vis type #done_type_name #impl_generics = #resume_type;
+        #vis type #yield_type_name #impl_generics = #yield_type;
+        #vis type #resume_type_name #impl_generics = #resume_type;
 
         // Capability structs
         #(#cap_structs)*
 
-        // Capability impls for each effect (individual Yield/Resume)
+        // Capability impls for each effect (uses ability's wide Yield/Resume)
         #(#cap_capability_impls)*
 
         // Effect impls (with Outcome and perform method)
@@ -470,18 +474,20 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
 
         // Capability impl for the ability itself (wide Yield/Resume)
         impl #impl_generics fx::Capability for #name #type_generics #where_clause {
-            type Yield = #do_type_name #type_generics;
-            type Resume = #done_type_name #type_generics;
+            type Yield = #yield_type_name #type_generics;
+            type Resume = #resume_type_name #type_generics;
         }
 
         // Effect impl for the ability (Outcome is the Resume variant)
         impl #impl_generics fx::Effect for #name #type_generics #where_clause {
-            type Outcome = #done_type_name #type_generics;
+            type Outcome = #resume_type_name #type_generics;
 
             async fn perform<__FxP>(self, _provider: &mut __FxP) -> Self::Outcome
             where
                 Self: Send,
                 __FxP: fx::Provider<Self::Yield, Output = Self::Resume> + Send,
+                Self::Yield: Send,
+                Self::Resume: Send,
                 Self::Outcome: Send,
             {
                 // Ability markers can't be performed directly
