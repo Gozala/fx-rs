@@ -397,4 +397,106 @@ mod macro_tests {
         assert_eq!(provider.count, 6); // incremented once
     }
 
+    // ===========================================
+    // Test multi-ability composition
+    // ===========================================
+
+    ability! {
+        pub Logger {
+            fn log(message: String) -> ()
+        }
+    }
+
+    // Provider that implements both Counter and Logger
+    struct MultiApp {
+        count: i32,
+        logs: Vec<String>,
+    }
+
+    impl CounterProvider for MultiApp {
+        fn get_count(&mut self) -> i32 {
+            self.count
+        }
+
+        fn increment(&mut self) {
+            self.count += 1;
+        }
+
+        fn add(&mut self, amount: i32) -> i32 {
+            self.count += amount;
+            self.count
+        }
+    }
+
+    impl LoggerProvider for MultiApp {
+        fn log(&mut self, message: String) {
+            self.logs.push(message);
+        }
+    }
+
+    // Test effectful with multiple abilities
+    #[effectful(Counter, Logger)]
+    fn counted_operation() -> i32 {
+        let count = perform!(Counter::get_count());
+        perform!(Logger::log(format!("Current count: {}", count)));
+        perform!(Counter::increment());
+        perform!(Logger::log("Incremented!".to_string()));
+        perform!(Counter::get_count())
+    }
+
+    #[tokio::test]
+    async fn test_multi_ability_effectful() {
+        let mut app = MultiApp {
+            count: 10,
+            logs: vec![],
+        };
+        let result = counted_operation().perform(&mut app).await;
+        assert_eq!(result, 11);
+        assert_eq!(app.logs, vec!["Current count: 10", "Incremented!"]);
+    }
+
+    // Test with State<T> and Logger (generic + non-generic)
+    #[effectful(State<String>, Logger)]
+    fn logged_state_op() -> String {
+        let current = perform!(State::<String>::get());
+        perform!(Logger::log(format!("Got: {}", current)));
+        let new_val = format!("{} updated", current);
+        perform!(State::<String>::set(new_val.clone()));
+        perform!(Logger::log("Updated state".to_string()));
+        new_val
+    }
+
+    // Combined provider for State<String> + Logger
+    struct StateLoggerApp {
+        value: String,
+        logs: Vec<String>,
+    }
+
+    impl StateProvider<String> for StateLoggerApp {
+        fn get(&mut self) -> String {
+            self.value.clone()
+        }
+
+        fn set(&mut self, value: String) {
+            self.value = value;
+        }
+    }
+
+    impl LoggerProvider for StateLoggerApp {
+        fn log(&mut self, message: String) {
+            self.logs.push(message);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generic_multi_ability() {
+        let mut app = StateLoggerApp {
+            value: "hello".to_string(),
+            logs: vec![],
+        };
+        let result = logged_state_op().perform(&mut app).await;
+        assert_eq!(result, "hello updated");
+        assert_eq!(app.value, "hello updated");
+        assert_eq!(app.logs, vec!["Got: hello", "Updated state"]);
+    }
 }
