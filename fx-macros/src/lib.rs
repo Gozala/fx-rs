@@ -99,8 +99,8 @@ pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Perform an effect inside an effectful context.
 ///
 /// This macro is used inside `#[effectful]` functions to invoke effects.
-/// It calls the capability's `dispatch` method, which has the correct
-/// Provider + Extract bounds for the specific effect.
+/// It calls the effect's `dispatch` method which uses the ability's wide
+/// `Yield`/`Resume` types via `CapabilityOf`.
 ///
 /// # Example
 ///
@@ -115,7 +115,7 @@ pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn perform(input: TokenStream) -> TokenStream {
     let input2: proc_macro2::TokenStream = input.into();
-    // Call the capability's dispatch method which has the correct bounds
+    // Call the effect's dispatch method which uses ability-wide Yield/Resume
     let output = quote::quote! {
         (#input2).dispatch(__fx_provider).await
     };

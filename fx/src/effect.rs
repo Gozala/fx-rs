@@ -1,10 +1,9 @@
-//! Effect trait and capability routing.
+//! Effect trait for effectful operations.
 //!
 //! This module defines the core `Effect` trait that all effects implement,
-//! and the internal `CapabilityRouter` trait that handles dispatching
-//! effects to providers.
+//! providing the `perform` method to execute effects with a provider.
 
-use crate::capability::CapabilityGroup;
+use crate::capability::{Capability, CapabilityOf};
 use crate::provider::Provider;
 use crate::variant::{Extract, VariantOf};
 use core::future::Future;
@@ -12,206 +11,199 @@ use core::future::Future;
 /// The main trait for effectful operations.
 ///
 /// Effects are operations that require external capabilities to execute.
-/// They define their output type and the capabilities they need, and can
-/// be performed using a provider that supplies those capabilities.
+/// They extend `Capability` (defining `Yield`/`Resume` variants) and add
+/// the `Outcome` type and `perform` method.
 ///
 /// # Associated Types
 ///
-/// - `Output`: The type returned when the effect is performed.
+/// - `Outcome`: The unwrapped type returned when the effect is performed.
 ///
 /// # Example
 ///
 /// ```ignore
-/// struct ReadFile { path: String }
-///
-/// impl CapabilityGroup for ReadFile {
-///     type Capabilities = Variant<ReadFile, Never>;
+/// // For an individual effect:
+/// impl Capability for CounterGetCount {
+///     type Yield = Variant<CounterGetCount>;
+///     type Resume = Variant<i32>;
 /// }
 ///
-/// impl Effect for ReadFile {
-///     type Output = Result<String, io::Error>;
+/// impl Effect for CounterGetCount {
+///     type Outcome = i32;
+///     // perform method is implemented by the macro
 /// }
 /// ```
-pub trait Effect: CapabilityGroup + Sized {
-    /// The type returned when this effect is performed.
-    type Output;
-}
+pub trait Effect: Capability + Sized {
+    /// The unwrapped type returned when this effect is performed.
+    type Outcome;
 
-/// Internal trait for routing effects to providers.
-///
-/// This trait handles the actual dispatch of effects through the capability
-/// system. It is implemented for effects that can be routed through a
-/// specific provider.
-///
-/// Users typically don't need to implement this trait directly; it is
-/// implemented via helper methods and macros.
-pub trait CapabilityRouter<P>: Effect {
-    /// Execute this effect using the provider.
-    fn execute(self, provider: &mut P) -> impl Future<Output = Self::Output> + Send;
-}
-
-/// Extension trait providing the `perform` method for effects.
-///
-/// This is automatically implemented for any type that implements both
-/// `Effect` and `CapabilityRouter<P>`.
-pub trait EffectExt: Effect + Sized {
     /// Perform this effect using the given provider.
     ///
-    /// This method routes the effect through the capability system and
-    /// returns the result.
-    fn perform<P>(self, provider: &mut P) -> impl Future<Output = Self::Output> + Send
+    /// The effect is yielded to the provider (via the `Yield` variant),
+    /// and the result is extracted from the provider's response (the `Resume` variant).
+    fn perform<P>(self, provider: &mut P) -> impl Future<Output = Self::Outcome> + Send
     where
-        Self: CapabilityRouter<P> + Send,
-        P: Send,
-    {
-        async move { self.execute(provider).await }
-    }
+        Self: Send,
+        P: Provider<Self::Yield, Output = Self::Resume> + Send,
+        Self::Outcome: Send;
 }
 
-impl<E: Effect + Sized> EffectExt for E {}
-
-// Implement CapabilityRouter for effects where the provider implements Provider<E> directly
-impl<E, P> CapabilityRouter<P> for E
+/// Helper function to perform an effect by injecting it into a variant,
+/// invoking the provider, and extracting the result.
+///
+/// This is used internally by `Effect::perform` implementations.
+///
+/// # Type Parameters
+///
+/// - `E`: The effect type
+/// - `Caps`: The capabilities variant type (same as `E::Yield`)
+/// - `Resume`: The resume variant type (same as `E::Resume`)
+/// - `Outcome`: The unwrapped output type (same as `E::Outcome`)
+/// - `Idx`: Type-level index for the effect's position in the variant
+/// - `P`: The provider type
+pub async fn perform_effect<E, Caps, Resume, Outcome, Idx, P>(
+    effect: E,
+    provider: &mut P,
+) -> Outcome
 where
-    E: Effect + Send,
-    P: Provider<E, Output = E::Output> + Send,
-    E::Output: Send,
+    E: Send,
+    Caps: VariantOf<E, Idx> + Send,
+    P: Provider<Caps, Output = Resume> + Send,
+    Resume: Extract<Outcome, Idx> + Send,
+    Outcome: Send,
 {
-    async fn execute(self, provider: &mut P) -> Self::Output {
-        provider.invoke(self).await
+    // Inject this effect into the Capabilities variant
+    let caps: Caps = Caps::of(effect);
+    // Invoke the provider with the variant
+    let result = provider.invoke(caps).await;
+    // Extract our output from the result variant
+    match result.extract() {
+        Ok(output) => output,
+        Err(_) => unreachable!("effect was injected at the same index we extract from"),
     }
 }
 
-/// Trait for performing an effect within a specific capabilities context.
+/// Extension trait for dispatching effects through ability-wide providers.
 ///
-/// This trait enables effects to be performed through a provider that implements
-/// `Provider<Caps>` where `Caps` is a Variant containing multiple capability types.
-/// The effect is injected into the Variant, executed, and the result is extracted.
+/// This trait is automatically implemented for all effects that implement
+/// both `Effect` and `CapabilityOf`. Use `dispatch` when you have a provider
+/// that implements `Provider<AbilityYield>` directly, rather than provider traits.
 ///
-/// The `Idx` type parameter is a type-level index that determines where in the
-/// Variant the effect type lives. This is typically inferred by the compiler.
-pub trait PerformIn<Caps, Idx>: Effect {
-    /// Perform this effect within the given capabilities context.
+/// # When to use `dispatch` vs `perform`
+///
+/// - Use `perform` with provider trait implementations (e.g., `CounterProvider`)
+/// - Use `dispatch` with direct `Provider<Capabilities>` implementations
+///
+/// # Example
+///
+/// ```ignore
+/// // Direct provider implementation (like effing-mad handlers)
+/// impl Provider<DirectCounterDo> for MyProvider {
+///     type Output = DirectCounterDone;
+///     async fn invoke(&mut self, effect: DirectCounterDo) -> Self::Output {
+///         match effect {
+///             Variant::Here(DirectCounterGet) => Variant::Here(self.count),
+///             Variant::There(Variant::Here(DirectCounterInc)) => {
+///                 self.count += 1;
+///                 Variant::There(Variant::Here(()))
+///             }
+///             Variant::There(Variant::There(never)) => match never {},
+///         }
+///     }
+/// }
+///
+/// // Use dispatch with direct provider
+/// let result = DirectCounter::get().dispatch(&mut provider).await;
+/// ```
+pub trait DispatchExt: Effect + CapabilityOf {
+    /// Dispatch this effect to a provider that handles the full ability's capabilities.
     ///
-    /// The effect is injected into the `Caps` variant, invoked via the provider,
-    /// and the result is extracted from the output variant.
-    fn perform_in<P>(self, provider: &mut P) -> impl Future<Output = Self::Output> + Send
+    /// Unlike `perform`, which requires a provider for this effect's narrow `Yield`/`Resume`,
+    /// `dispatch` uses the ability's wide `Yield`/`Resume` types via `CapabilityOf`.
+    fn dispatch<P>(self, provider: &mut P) -> impl Future<Output = Self::Outcome> + Send
     where
         Self: Send,
-        P: Provider<Caps> + Send,
-        Caps: VariantOf<Self, Idx> + Send,
-        <P as Provider<Caps>>::Output: Extract<Self::Output, Idx> + Send;
+        <Self::Ability as Capability>::Yield: VariantOf<Self, Self::Index> + Send,
+        P: Provider<
+                <Self::Ability as Capability>::Yield,
+                Output = <Self::Ability as Capability>::Resume,
+            > + Send,
+        <Self::Ability as Capability>::Resume: Extract<Self::Outcome, Self::Index> + Send,
+        Self::Outcome: Send;
 }
 
-impl<E, Caps, Idx> PerformIn<Caps, Idx> for E
+impl<E> DispatchExt for E
 where
-    E: Effect,
+    E: Effect + CapabilityOf,
 {
-    async fn perform_in<P>(self, provider: &mut P) -> Self::Output
+    async fn dispatch<P>(self, provider: &mut P) -> Self::Outcome
     where
         Self: Send,
-        P: Provider<Caps> + Send,
-        Caps: VariantOf<Self, Idx> + Send,
-        <P as Provider<Caps>>::Output: Extract<Self::Output, Idx> + Send,
+        <Self::Ability as Capability>::Yield: VariantOf<Self, Self::Index> + Send,
+        P: Provider<
+                <Self::Ability as Capability>::Yield,
+                Output = <Self::Ability as Capability>::Resume,
+            > + Send,
+        <Self::Ability as Capability>::Resume: Extract<Self::Outcome, Self::Index> + Send,
+        Self::Outcome: Send,
     {
-        // Inject this effect into the Capabilities variant
-        let caps: Caps = Caps::of(self);
-        // Invoke the provider with the variant
-        let result = provider.invoke(caps).await;
-        // Extract our output from the result variant
-        // This is safe because we injected at Idx and extract at Idx
-        match result.extract() {
-            Ok(output) => output,
-            Err(_) => unreachable!("effect was injected at the same index we extract from"),
-        }
+        perform_effect::<
+            Self,
+            <Self::Ability as Capability>::Yield,
+            <Self::Ability as Capability>::Resume,
+            Self::Outcome,
+            Self::Index,
+            P,
+        >(self, provider)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variant::{Never, Variant};
+    use crate::variant::{Never, Variant, Z};
 
     // Test effect
     struct GetCounter;
 
-    impl CapabilityGroup for GetCounter {
-        type Capabilities = Variant<GetCounter, Never>;
+    impl Capability for GetCounter {
+        type Yield = Variant<GetCounter, Never>;
+        type Resume = Variant<i32, Never>;
     }
 
     impl Effect for GetCounter {
-        type Output = i32;
+        type Outcome = i32;
+
+        async fn perform<P>(self, provider: &mut P) -> i32
+        where
+            Self: Send,
+            P: Provider<Self::Yield, Output = Self::Resume> + Send,
+            Self::Outcome: Send,
+        {
+            perform_effect::<Self, Self::Yield, Self::Resume, Self::Outcome, Z, P>(
+                self, provider,
+            )
+            .await
+        }
     }
 
-    // Test provider
-    struct CounterProvider {
+    // Test provider - implements Provider<Yield> directly
+    struct TestCounterProvider {
         count: i32,
     }
 
-    impl Provider<GetCounter> for CounterProvider {
-        type Output = i32;
+    impl Provider<Variant<GetCounter, Never>> for TestCounterProvider {
+        type Output = Variant<i32, Never>;
 
-        async fn invoke(&mut self, _: GetCounter) -> i32 {
-            self.count
+        async fn invoke(&mut self, _effect: Variant<GetCounter, Never>) -> Self::Output {
+            Variant::Here(self.count)
         }
     }
 
     #[tokio::test]
     async fn test_effect_perform() {
-        let mut provider = CounterProvider { count: 42 };
+        let mut provider = TestCounterProvider { count: 42 };
         let result = GetCounter.perform(&mut provider).await;
         assert_eq!(result, 42);
-    }
-
-    // Test with multiple effects
-    struct Increment;
-    struct Decrement;
-
-    impl CapabilityGroup for Increment {
-        type Capabilities = Variant<Increment, Never>;
-    }
-
-    impl Effect for Increment {
-        type Output = i32;
-    }
-
-    impl CapabilityGroup for Decrement {
-        type Capabilities = Variant<Decrement, Never>;
-    }
-
-    impl Effect for Decrement {
-        type Output = i32;
-    }
-
-    impl Provider<Increment> for CounterProvider {
-        type Output = i32;
-
-        async fn invoke(&mut self, _: Increment) -> i32 {
-            self.count += 1;
-            self.count
-        }
-    }
-
-    impl Provider<Decrement> for CounterProvider {
-        type Output = i32;
-
-        async fn invoke(&mut self, _: Decrement) -> i32 {
-            self.count -= 1;
-            self.count
-        }
-    }
-
-    #[tokio::test]
-    async fn test_multiple_effects() {
-        let mut provider = CounterProvider { count: 10 };
-
-        let result = Increment.perform(&mut provider).await;
-        assert_eq!(result, 11);
-
-        let result = Increment.perform(&mut provider).await;
-        assert_eq!(result, 12);
-
-        let result = Decrement.perform(&mut provider).await;
-        assert_eq!(result, 11);
     }
 }

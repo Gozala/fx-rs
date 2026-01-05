@@ -3,7 +3,7 @@
 //! The `Task` type wraps a closure that performs effects, allowing it
 //! to be composed and executed through the effect system.
 
-use crate::capability::CapabilityGroup;
+use crate::capability::Capability;
 use crate::provider::Provider;
 use core::future::Future;
 use core::marker::PhantomData;
@@ -67,8 +67,9 @@ impl<F, C, O> Task<F, C, O> {
     }
 }
 
-impl<F, C, O> CapabilityGroup for Task<F, C, O> {
-    type Capabilities = C;
+impl<F, C, O> Capability for Task<F, C, O> {
+    type Yield = C;
+    type Resume = O;
 }
 
 /// Helper trait for creating tasks with inferred capability types.

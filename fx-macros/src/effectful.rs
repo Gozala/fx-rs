@@ -25,14 +25,14 @@ impl Parse for EffectfulAttr {
 /// Build Provider bounds with exact output type.
 /// For Counter, generates:
 ///   __FxP: fx::Provider<
-///       <Counter as fx::CapabilityGroup>::Capabilities,
-///       Output = <Counter as fx::OutputVariant>::ExpectedOutput
+///       <Counter as fx::Capability>::Yield,
+///       Output = <Counter as fx::Capability>::Resume
 ///   >
 ///
 /// By requiring the exact Output type, Extract bounds are automatically satisfied
 /// since we know the concrete output variant type.
 ///
-/// This allows users to satisfy bounds by implementing Provider<Capabilities> directly,
+/// This allows users to satisfy bounds by implementing Provider<Yield> directly,
 /// similar to how effing-mad handlers work.
 fn build_handles_bounds(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
     if caps.is_empty() {
@@ -46,8 +46,8 @@ fn build_handles_bounds(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
             // This ensures all Extract bounds are satisfied since we know the concrete type
             quote! {
                 __FxP: fx::Provider<
-                    <#ty as fx::CapabilityGroup>::Capabilities,
-                    Output = <#ty as fx::OutputVariant>::ExpectedOutput
+                    <#ty as fx::Capability>::Yield,
+                    Output = <#ty as fx::Capability>::Resume
                 >
             }
         })
@@ -57,7 +57,7 @@ fn build_handles_bounds(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
 }
 
 /// Build the combined capabilities type from ability types.
-/// For single ability: <Counter as fx::CapabilityGroup>::Capabilities
+/// For single ability: <Counter as fx::Capability>::Yield
 /// For multiple: flattened variant of all capabilities
 fn build_capabilities_type(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
     if caps.is_empty() {
@@ -66,7 +66,7 @@ fn build_capabilities_type(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
 
     if caps.len() == 1 {
         let cap = caps.first().unwrap();
-        return quote! { <#cap as fx::CapabilityGroup>::Capabilities };
+        return quote! { <#cap as fx::Capability>::Yield };
     }
 
     // For multiple capabilities, build a Variant and flatten it

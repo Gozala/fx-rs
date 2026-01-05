@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Generics, Ident, Result, Token, Type, Visibility, WhereClause, braced, parenthesized,
+    Generics, Ident, Result, Token, Type, Visibility, braced, parenthesized,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
@@ -103,6 +103,10 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
 
     // Generate provider trait name
     let provider_trait_name = format_ident!("{}Provider", name);
+
+    // Generate type alias names
+    let do_type_name = format_ident!("{}Do", name);
+    let done_type_name = format_ident!("{}Done", name);
 
     // Generate capability struct names
     let cap_struct_names: Vec<Ident> = def
@@ -204,27 +208,12 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         })
         .collect();
 
-    // Generate CapabilityGroup impls for each capability
-    let cap_group_impls: Vec<TokenStream2> = def
-        .methods
-        .iter()
-        .zip(cap_struct_names.iter())
-        .map(|(m, cap_name)| {
-            let method_generics = &m.generics;
-            let combined_generics = combine_generics(generics, method_generics);
-            let (cap_impl_generics, cap_type_generics, cap_where) =
-                combined_generics.split_for_impl();
+    // Build the variant types
+    let yield_type = build_variant_type(&cap_struct_names, type_generics.clone());
+    let resume_type = build_output_variant_type(def);
 
-            quote! {
-                impl #cap_impl_generics fx::capability::CapabilityGroup for #cap_name #cap_type_generics #cap_where {
-                    type Capabilities = fx::variant::Variant<#cap_name #cap_type_generics, fx::variant::Never>;
-                }
-            }
-        })
-        .collect();
-
-    // Generate Effect impls for each capability
-    let effect_impls: Vec<TokenStream2> = def
+    // Generate Capability impls for each effect (individual effect's Yield/Resume)
+    let cap_capability_impls: Vec<TokenStream2> = def
         .methods
         .iter()
         .zip(cap_struct_names.iter())
@@ -235,43 +224,17 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
             let (cap_impl_generics, cap_type_generics, cap_where) =
                 combined_generics.split_for_impl();
 
-            // Add Send bounds for async
-            let send_where = add_send_bounds(&combined_generics, cap_where.cloned());
-
             quote! {
-                impl #cap_impl_generics fx::effect::Effect for #cap_name #cap_type_generics #send_where {
-                    type Output = #return_type;
+                impl #cap_impl_generics fx::Capability for #cap_name #cap_type_generics #cap_where {
+                    type Yield = fx::Variant<#cap_name #cap_type_generics, fx::Never>;
+                    type Resume = fx::Variant<#return_type, fx::Never>;
                 }
             }
         })
         .collect();
 
-    // Generate HasAbility impls linking each effect back to its ability
-    let has_ability_impls: Vec<TokenStream2> = def
-        .methods
-        .iter()
-        .zip(cap_struct_names.iter())
-        .map(|(m, cap_name)| {
-            let method_generics = &m.generics;
-            let combined_generics = combine_generics(generics, method_generics);
-            let (cap_impl_generics, cap_type_generics, cap_where) =
-                combined_generics.split_for_impl();
-
-            quote! {
-                impl #cap_impl_generics fx::HasAbility for #cap_name #cap_type_generics #cap_where {
-                    type Ability = #name #type_generics;
-                }
-            }
-        })
-        .collect();
-
-    // Build the variant type for all capabilities (needed by dispatch_impls below)
-    let variant_type = build_variant_type(&cap_struct_names, type_generics.clone());
-
-    // Generate dispatch impls for each capability
-    // Each capability gets a dispatch method with the correct Provider + Extract bounds
-    // This is what perform! calls to execute effects
-    let dispatch_impls: Vec<TokenStream2> = def
+    // Generate Effect impls for each capability (with perform method)
+    let effect_impls: Vec<TokenStream2> = def
         .methods
         .iter()
         .zip(cap_struct_names.iter())
@@ -280,48 +243,58 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
             let return_type = &m.return_type;
             let method_generics = &m.generics;
             let combined_generics = combine_generics(generics, method_generics);
-            let (cap_impl_generics, cap_type_generics, _) =
+            let (cap_impl_generics, cap_type_generics, cap_where) =
                 combined_generics.split_for_impl();
 
             // Build type-level index for this effect's position
-            let idx_type = build_index_type(idx);
+            let _idx_type = build_index_type(idx);
 
-            // Build where predicates with Provider<Caps> + Extract bounds
-            let mut where_predicates: Vec<TokenStream2> = vec![
-                quote! { __FxP: fx::Provider<#variant_type> + Send },
-                quote! { <__FxP as fx::Provider<#variant_type>>::Output: fx::Extract<#return_type, #idx_type> + Send },
-                quote! { #return_type: Send },
-            ];
-            for param in &combined_generics.params {
-                if let syn::GenericParam::Type(ty) = param {
-                    let ident = &ty.ident;
-                    where_predicates.push(quote! { #ident: Send });
-                }
-            }
-            if let Some(wc) = &combined_generics.where_clause {
-                for pred in &wc.predicates {
-                    where_predicates.push(quote! { #pred });
-                }
-            }
-
+            // The perform method bounds are fixed by the trait - only these three bounds
+            // are allowed. Extra generic bounds must be on the impl block, not the method.
             quote! {
-                impl #cap_impl_generics #cap_name #cap_type_generics {
-                    /// Dispatch this effect to a provider.
-                    ///
-                    /// This method has the correct bounds for Provider<Capabilities> + Extract.
-                    /// It is called by the `perform!` macro.
-                    pub async fn dispatch<__FxP>(self, provider: &mut __FxP) -> #return_type
+                impl #cap_impl_generics fx::Effect for #cap_name #cap_type_generics #cap_where {
+                    type Outcome = #return_type;
+
+                    async fn perform<__FxP>(self, provider: &mut __FxP) -> Self::Outcome
                     where
-                        #(#where_predicates),*
+                        Self: Send,
+                        __FxP: fx::Provider<Self::Yield, Output = Self::Resume> + Send,
+                        Self::Outcome: Send,
                     {
-                        fx::PerformIn::<#variant_type, #idx_type>::perform_in(self, provider).await
+                        fx::perform_effect::<Self, Self::Yield, Self::Resume, Self::Outcome, fx::Z, __FxP>(
+                            self, provider
+                        ).await
                     }
                 }
             }
         })
         .collect();
 
-    // Generate Provider impls for each capability
+    // Generate CapabilityOf impls linking each effect back to its ability
+    let capability_of_impls: Vec<TokenStream2> = def
+        .methods
+        .iter()
+        .zip(cap_struct_names.iter())
+        .enumerate()
+        .map(|(idx, (m, cap_name))| {
+            let method_generics = &m.generics;
+            let combined_generics = combine_generics(generics, method_generics);
+            let (cap_impl_generics, cap_type_generics, cap_where) =
+                combined_generics.split_for_impl();
+
+            // Build type-level index for this effect's position
+            let idx_type = build_index_type(idx);
+
+            quote! {
+                impl #cap_impl_generics fx::CapabilityOf for #cap_name #cap_type_generics #cap_where {
+                    type Ability = #name #type_generics;
+                    type Index = #idx_type;
+                }
+            }
+        })
+        .collect();
+
+    // Generate Provider impls for each capability (blanket impl from provider trait)
     let provider_impls: Vec<TokenStream2> = def
         .methods
         .iter()
@@ -361,7 +334,7 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
 
             if m.args.is_empty() {
                 quote! {
-                    impl #all_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
+                    impl #all_generics fx::Provider<#cap_name #cap_type_generics> for __FxP
                         #where_clause
                     {
                         type Output = #return_type;
@@ -373,7 +346,7 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
                 }
             } else {
                 quote! {
-                    impl #all_generics fx::provider::Provider<#cap_name #cap_type_generics> for __FxP
+                    impl #all_generics fx::Provider<#cap_name #cap_type_generics> for __FxP
                         #where_clause
                     {
                         type Output = #return_type;
@@ -463,139 +436,58 @@ fn generate_ability(def: &AbilityDef) -> TokenStream2 {
         quote! { (#(#phantom_types),*) }
     };
 
-    // Build the output variant type (return types wrapped in Variant)
-    let output_variant_type = build_output_variant_type(def);
-
-    // Build Extract bounds for each capability's return type
-    let extract_bounds = build_extract_bounds(def);
-
-    // Collect all generic params for Handles impl
-    let mut handles_params: Vec<TokenStream2> = vec![quote! { __FxP }];
-    for param in &generics.params {
-        handles_params.push(quote! { #param });
-    }
-
-    // Build Handles where clause with Extract bounds for each effect
-    let handles_where = {
-        let mut predicates: Vec<TokenStream2> = vec![
-            quote! { __FxP: fx::Provider<#variant_type> + Send },
-            quote! { <__FxP as fx::Provider<#variant_type>>::Output: #extract_bounds Send },
-        ];
-        // Add Send bounds for type parameters
-        for param in &generics.params {
-            if let syn::GenericParam::Type(ty) = param {
-                let ident = &ty.ident;
-                predicates.push(quote! { #ident: Send });
-            }
-        }
-        if let Some(wc) = where_clause {
-            for pred in &wc.predicates {
-                predicates.push(quote! { #pred });
-            }
-        }
-        quote! { where #(#predicates),* }
-    };
-
-    // Generate Handle impls for each capability using PerformIn
-    let handle_impls: Vec<TokenStream2> = def
-        .methods
-        .iter()
-        .zip(cap_struct_names.iter())
-        .enumerate()
-        .map(|(idx, (m, cap_name))| {
-            let return_type = &m.return_type;
-            let method_generics = &m.generics;
-            let combined_generics = combine_generics(generics, method_generics);
-            let (_, cap_type_generics, _) = combined_generics.split_for_impl();
-
-            // Build type-level index for this effect's position
-            let idx_type = build_index_type(idx);
-
-            // Build generic params including __FxP
-            let mut all_params: Vec<TokenStream2> = vec![quote! { __FxP }];
-            for param in &combined_generics.params {
-                all_params.push(quote! { #param });
-            }
-
-            // Build where clause - using Provider<Caps> + Extract bounds
-            let mut where_predicates: Vec<TokenStream2> = vec![
-                quote! { __FxP: fx::Provider<#variant_type> + Send },
-                quote! { <__FxP as fx::Provider<#variant_type>>::Output: fx::Extract<#return_type, #idx_type> + Send },
-                quote! { #return_type: Send },
-            ];
-            for param in &combined_generics.params {
-                if let syn::GenericParam::Type(ty) = param {
-                    let ident = &ty.ident;
-                    where_predicates.push(quote! { #ident: Send });
-                }
-            }
-            if let Some(wc) = &combined_generics.where_clause {
-                for pred in &wc.predicates {
-                    where_predicates.push(quote! { #pred });
-                }
-            }
-
-            quote! {
-                impl <#(#all_params),*> fx::capability::Handle<#cap_name #cap_type_generics, __FxP> for #name #type_generics
-                where
-                    #(#where_predicates),*
-                {
-                    async fn handle(effect: #cap_name #cap_type_generics, provider: &mut __FxP) -> #return_type {
-                        fx::PerformIn::<#variant_type, #idx_type>::perform_in(effect, provider).await
-                    }
-                }
-            }
-        })
-        .collect();
-
     quote! {
-        // Provider trait
+        // Provider trait (convenience for implementors)
         #vis trait #provider_trait_name #impl_generics #where_clause {
             #(#provider_methods)*
         }
 
+        // Type aliases for the ability's Yield and Resume variants
+        #vis type #do_type_name #impl_generics = #yield_type;
+        #vis type #done_type_name #impl_generics = #resume_type;
+
         // Capability structs
         #(#cap_structs)*
 
-        // CapabilityGroup impls
-        #(#cap_group_impls)*
+        // Capability impls for each effect (individual Yield/Resume)
+        #(#cap_capability_impls)*
 
-        // Effect impls
+        // Effect impls (with Outcome and perform method)
         #(#effect_impls)*
 
-        // HasAbility impls - link effects to their ability
-        #(#has_ability_impls)*
+        // CapabilityOf impls - link effects to their ability
+        #(#capability_of_impls)*
 
-        // Dispatch impls - each capability gets a dispatch method for perform!
-        #(#dispatch_impls)*
-
-        // Provider impls (blanket)
+        // Provider impls (blanket impl from provider trait)
         #(#provider_impls)*
 
-        // Handle impls - dispatch effects through ability type
-        #(#handle_impls)*
-
-        // Marker struct
+        // Marker struct for the ability
         #vis struct #name #impl_generics (::core::marker::PhantomData<#phantom_tuple>) #where_clause;
 
         impl #impl_generics #name #type_generics #where_clause {
             #(#builder_methods)*
         }
 
-        impl #impl_generics fx::capability::CapabilityGroup for #name #type_generics #where_clause {
-            type Capabilities = #variant_type;
+        // Capability impl for the ability itself (wide Yield/Resume)
+        impl #impl_generics fx::Capability for #name #type_generics #where_clause {
+            type Yield = #do_type_name #type_generics;
+            type Resume = #done_type_name #type_generics;
         }
 
-        impl #impl_generics fx::capability::OutputVariant for #name #type_generics #where_clause {
-            type ExpectedOutput = #output_variant_type;
-        }
+        // Effect impl for the ability (Outcome is the Resume variant)
+        impl #impl_generics fx::Effect for #name #type_generics #where_clause {
+            type Outcome = #done_type_name #type_generics;
 
-        // Handles impl - indicates P can handle all effects in this ability group
-        // This encapsulates Provider<Caps> + Extract bounds for each effect
-        impl <#(#handles_params),*> fx::capability::Handles<__FxP> for #name #type_generics
-            #handles_where
-        {
-            type Output = <__FxP as fx::Provider<#variant_type>>::Output;
+            async fn perform<__FxP>(self, _provider: &mut __FxP) -> Self::Outcome
+            where
+                Self: Send,
+                __FxP: fx::Provider<Self::Yield, Output = Self::Resume> + Send,
+                Self::Outcome: Send,
+            {
+                // Ability markers can't be performed directly
+                // They're used for type-level information
+                unreachable!("ability marker struct cannot be performed directly")
+            }
         }
     }
 }
@@ -631,39 +523,14 @@ fn combine_generics(a: &Generics, b: &Generics) -> Generics {
     result
 }
 
-/// Add Send bounds to all type parameters.
-fn add_send_bounds(generics: &Generics, where_clause: Option<WhereClause>) -> TokenStream2 {
-    let mut predicates = Vec::new();
-
-    for param in &generics.params {
-        if let syn::GenericParam::Type(ty) = param {
-            let ident = &ty.ident;
-            predicates.push(quote! { #ident: Send });
-        }
-    }
-
-    if let Some(wc) = where_clause {
-        let existing: Vec<_> = wc.predicates.iter().collect();
-        quote! {
-            where #(#existing,)* #(#predicates),*
-        }
-    } else if !predicates.is_empty() {
-        quote! {
-            where #(#predicates),*
-        }
-    } else {
-        quote! {}
-    }
-}
-
 /// Build a nested Variant type from capability names.
 fn build_variant_type(cap_names: &[Ident], type_generics: syn::TypeGenerics) -> TokenStream2 {
     if cap_names.is_empty() {
-        quote! { fx::variant::Never }
+        quote! { fx::Never }
     } else {
-        let mut result = quote! { fx::variant::Never };
+        let mut result = quote! { fx::Never };
         for cap in cap_names.iter().rev() {
-            result = quote! { fx::variant::Variant<#cap #type_generics, #result> };
+            result = quote! { fx::Variant<#cap #type_generics, #result> };
         }
         result
     }
@@ -673,36 +540,15 @@ fn build_variant_type(cap_names: &[Ident], type_generics: syn::TypeGenerics) -> 
 /// E.g., for methods returning i32, (), i32 -> Variant<i32, Variant<(), Variant<i32, Never>>>
 fn build_output_variant_type(def: &AbilityDef) -> TokenStream2 {
     if def.methods.is_empty() {
-        quote! { fx::variant::Never }
+        quote! { fx::Never }
     } else {
-        let mut result = quote! { fx::variant::Never };
+        let mut result = quote! { fx::Never };
         for m in def.methods.iter().rev() {
             let return_type = &m.return_type;
-            result = quote! { fx::variant::Variant<#return_type, #result> };
+            result = quote! { fx::Variant<#return_type, #result> };
         }
         result
     }
-}
-
-/// Build Extract bounds for each capability's return type.
-/// E.g., Extract<i32, Z> + Extract<(), S<Z>> + Extract<i32, S<S<Z>>> +
-fn build_extract_bounds(def: &AbilityDef) -> TokenStream2 {
-    if def.methods.is_empty() {
-        return quote! {};
-    }
-
-    let bounds: Vec<TokenStream2> = def
-        .methods
-        .iter()
-        .enumerate()
-        .map(|(idx, m)| {
-            let return_type = &m.return_type;
-            let idx_type = build_index_type(idx);
-            quote! { fx::Extract<#return_type, #idx_type> }
-        })
-        .collect();
-
-    quote! { #(#bounds)+* + }
 }
 
 /// Build type-level index: Z, S<Z>, S<S<Z>>, etc.
