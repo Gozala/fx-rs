@@ -69,7 +69,8 @@ pub fn effect(input: TokenStream) -> TokenStream {
 /// Mark a function as effectful.
 ///
 /// The `#[effectful]` attribute transforms a function into one that returns
-/// an effect. Use `perform!()` macro inside for effect invocations.
+/// an effect struct with a `.perform()` method. Use `perform!()` inside to
+/// invoke effects.
 ///
 /// # Example
 ///
@@ -83,8 +84,13 @@ pub fn effect(input: TokenStream) -> TokenStream {
 /// let result = read_value().perform(&mut provider).await;
 /// ```
 ///
-/// **Note**: Use `perform!()` inside `#[effectful]` functions. The `yield`
-/// syntax only works inside `effect! {}` blocks (due to Rust's keyword parsing).
+/// For `yield` syntax, use `effect!{}` blocks instead:
+///
+/// ```ignore
+/// let result = effect!(&mut provider, {
+///     yield State::<i32>::get()
+/// }).await;
+/// ```
 #[proc_macro_attribute]
 pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
     effectful::effectful_impl(attr, item)

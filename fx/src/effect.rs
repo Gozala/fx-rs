@@ -6,7 +6,6 @@
 
 use crate::capability::CapabilityGroup;
 use crate::provider::Provider;
-use crate::variant::{Never, Variant};
 use core::future::Future;
 
 /// The main trait for effectful operations.
@@ -70,23 +69,22 @@ pub trait EffectExt: Effect + Sized {
 
 impl<E: Effect + Sized> EffectExt for E {}
 
-// Implement CapabilityRouter for simple single-capability effects at position Z (first position)
+// Implement CapabilityRouter for effects where the provider implements Provider<E> directly
 impl<E, P> CapabilityRouter<P> for E
 where
     E: Effect + Send,
-    P: Provider<Variant<E, Never>, Output = Variant<E::Output, Never>> + Send,
+    P: Provider<E, Output = E::Output> + Send,
     E::Output: Send,
 {
     async fn execute(self, provider: &mut P) -> Self::Output {
-        let capability: Variant<E, Never> = Variant::Here(self);
-        let result = provider.invoke(capability).await;
-        result.unwrap()
+        provider.invoke(self).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variant::{Never, Variant};
 
     // Test effect
     struct GetCounter;

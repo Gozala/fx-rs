@@ -322,4 +322,5 @@ mod macro_tests {
         assert_eq!(result, 30); // 10 * 3
         assert_eq!(app.count, 30); // 10 + 10 + 10
     }
+
 }

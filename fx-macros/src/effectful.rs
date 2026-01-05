@@ -7,7 +7,7 @@ use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
-    FnArg, ItemFn, Pat, Result, Token, Type, TypePath,
+    FnArg, ItemFn, Pat, PathArguments, Result, Token, Type,
 };
 
 /// The capability groups specified in the attribute.
@@ -22,19 +22,58 @@ impl Parse for EffectfulAttr {
     }
 }
 
-/// Extract the provider trait name from a capability type.
-/// For `Counter`, returns `CounterProvider`.
-/// For `State<T>`, returns `StateProvider<T>`.
-fn get_provider_trait(ty: &Type) -> Option<TokenStream2> {
-    match ty {
-        Type::Path(TypePath { qself: None, path }) => {
-            let last_segment = path.segments.last()?;
-            let ident = &last_segment.ident;
-            let provider_ident = Ident::new(&format!("{}Provider", ident), Span::call_site());
-            let args = &last_segment.arguments;
-            Some(quote! { #provider_ident #args })
-        }
-        _ => None,
+/// Build provider trait bounds from ability types.
+/// For Counter, generates: CounterProvider
+/// For State<String>, generates: StateProvider<String>
+/// For (Counter, State<String>), generates: CounterProvider + StateProvider<String>
+fn build_provider_bounds(caps: &Punctuated<Type, Token![,]>) -> TokenStream2 {
+    if caps.is_empty() {
+        return quote! { Send };
+    }
+
+    let bounds: Vec<TokenStream2> = caps
+        .iter()
+        .map(|ty| {
+            match ty {
+                Type::Path(type_path) => {
+                    // Get the last segment (e.g., "Counter" or "State<String>")
+                    if let Some(segment) = type_path.path.segments.last() {
+                        let ability_name = &segment.ident;
+                        let provider_name =
+                            Ident::new(&format!("{}Provider", ability_name), ability_name.span());
+
+                        // Handle generic arguments
+                        match &segment.arguments {
+                            PathArguments::None => {
+                                quote! { #provider_name }
+                            }
+                            PathArguments::AngleBracketed(args) => {
+                                let generic_args: Vec<_> = args.args.iter().collect();
+                                quote! { #provider_name<#(#generic_args),*> }
+                            }
+                            PathArguments::Parenthesized(_) => {
+                                // Function-like generics, just use the type as-is
+                                quote! { #provider_name }
+                            }
+                        }
+                    } else {
+                        // Fallback - shouldn't happen
+                        quote! {}
+                    }
+                }
+                _ => {
+                    // For non-path types, we can't generate provider bounds
+                    quote! {}
+                }
+            }
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if bounds.is_empty() {
+        quote! { Send }
+    } else {
+        quote! { #(#bounds)+* + Send }
     }
 }
 
@@ -72,19 +111,8 @@ pub fn effectful_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let existing_where = &fn_generics.where_clause;
     let (_, type_generics, _) = fn_generics.split_for_impl();
 
-    // Get provider traits from capability types
-    let provider_traits: Vec<TokenStream2> = attr
-        .capabilities
-        .iter()
-        .filter_map(|cap| get_provider_trait(cap))
-        .collect();
-
-    // Build the trait bounds
-    let provider_bounds = if provider_traits.is_empty() {
-        quote! { Send }
-    } else {
-        quote! { #(#provider_traits +)* Send }
-    };
+    // Build provider trait bounds (e.g., CounterProvider + StateProvider<T>)
+    let provider_bounds = build_provider_bounds(&attr.capabilities);
 
     // Generate struct name from function name (PascalCase + Effect)
     let struct_name = Ident::new(
